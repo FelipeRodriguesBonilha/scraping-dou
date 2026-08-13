@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import urlencode
 
 from playwright.sync_api import Page, Playwright
 
 from scrapers.common import (
-    click_next,
-    date_as_br,
     filter_occurrence_pages,
     read_occurrence_download,
     run_for_keywords,
@@ -22,8 +20,10 @@ from scrapers.common import (
 
 
 STATE = "RS"
-URL = "https://www.diariooficial.rs.gov.br/resultado"
 API_BASE = "https://doe-backend.pro.rs.gov.br/public"
+API_REQUEST_ATTEMPTS = 3
+API_REQUEST_TIMEOUT_MS = 60_000
+MAX_SEARCH_PAGES = 10_000
 
 
 class _ResponseDownload:
@@ -36,27 +36,77 @@ class _ResponseDownload:
 
 
 def _get_json(page: Page, url: str) -> dict:
-    response = page.context.request.get(url, timeout=60_000)
-    if response.status != 200:
-        raise RuntimeError(f"API do RS indisponível (HTTP {response.status})")
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise RuntimeError("API do RS retornou um JSON inesperado")
-    return payload
+    last_error: Exception | None = None
+    for attempt in range(1, API_REQUEST_ATTEMPTS + 1):
+        try:
+            response = page.context.request.get(url, timeout=API_REQUEST_TIMEOUT_MS)
+        except Exception as error:
+            last_error = error
+        else:
+            if response.status == 200:
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise RuntimeError("API do RS retornou um JSON inesperado")
+                return payload
+            if response.status < 500 and response.status != 429:
+                raise RuntimeError(f"API do RS indisponível (HTTP {response.status})")
+            last_error = RuntimeError(f"API do RS indisponível (HTTP {response.status})")
+
+        if attempt < API_REQUEST_ATTEMPTS:
+            print(
+                f"[{STATE}] API indisponível "
+                f"(tentativa {attempt}/{API_REQUEST_ATTEMPTS}); tentando novamente..."
+            )
+            time.sleep(attempt)
+
+    raise RuntimeError(
+        "API do RS não respondeu após "
+        f"{API_REQUEST_ATTEMPTS} tentativas: {last_error}"
+    ) from last_error
+
+
+def _search_url(keyword: str, date_value: str, page_number: int) -> str:
+    parameters = {
+        "page": page_number,
+        "tipoDiario": 1,
+        "queryString": keyword,
+        "dataIni": date_value,
+        "dataFim": date_value,
+    }
+    return f"{API_BASE}/materias/?{urlencode(parameters)}"
+
+
+def _search_page(payload: dict) -> tuple[list[str], int, int, int]:
+    collection = payload.get("collection")
+    if not isinstance(collection, list):
+        raise RuntimeError("API do RS retornou resultados em formato inesperado")
+    try:
+        total = int(payload.get("collectionSize", 0))
+        page_size = int(payload.get("pageSize", 0))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("API do RS não informou a paginação da busca") from error
+    if total < 0 or page_size <= 0:
+        raise RuntimeError("API do RS informou uma paginação inválida")
+
+    material_ids: list[str] = []
+    for result in collection:
+        if not isinstance(result, dict):
+            continue
+        origin = str(result.get("origem") or "MATERIA").strip().upper()
+        if origin != "MATERIA":
+            continue
+        material_id = str(result.get("id") or "").strip()
+        if material_id.isdigit():
+            material_ids.append(material_id)
+    return material_ids, total, page_size, len(collection)
 
 
 def _get_pdf(page: Page, url: str, filename: str) -> _ResponseDownload:
-    response = page.context.request.get(url, timeout=60_000)
+    response = page.context.request.get(url, timeout=API_REQUEST_TIMEOUT_MS)
     content = response.body()
     if response.status != 200 or not content.startswith(b"%PDF"):
         raise RuntimeError(f"PDF do RS indisponível (HTTP {response.status})")
     return _ResponseDownload(content, filename)
-
-
-def _material_id(href: str, base_url: str) -> str | None:
-    parsed = urlparse(urljoin(base_url, href))
-    material_id = parse_qs(parsed.query).get("id", [""])[0]
-    return material_id if material_id.isdigit() else None
 
 
 def _publication_date(value: object) -> str | None:
@@ -137,6 +187,7 @@ def _download_material(
                 keyword,
                 date_value=date_value,
                 extract_occurrences=False,
+                deduplicate_identical=True,
             )
 
         page_key = str(page_id)
@@ -165,8 +216,9 @@ def _download_material(
         return False
 
 
-def _download_current_page(
+def _download_search_page(
     page: Page,
+    material_ids: Iterable[str],
     keyword: str,
     date_value: str,
     saved_editions: dict[str, Path],
@@ -175,12 +227,9 @@ def _download_current_page(
     native_occurrences: dict[str, list[tuple[int, str]]],
     failed_page_editions: set[str],
 ) -> int:
-    result_links = page.locator("a[href*='/materia']")
     saved = 0
-    for index in range(result_links.count()):
-        href = result_links.nth(index).get_attribute("href") or ""
-        material_id = _material_id(href, page.url)
-        if material_id is None or material_id in seen_materials:
+    for index, material_id in enumerate(material_ids, start=1):
+        if material_id in seen_materials:
             continue
         seen_materials.add(material_id)
         try:
@@ -196,7 +245,7 @@ def _download_current_page(
             ):
                 saved += 1
         except Exception as error:
-            print(f"[{STATE}] falha ao baixar resultado {index + 1}: {error}")
+            print(f"[{STATE}] falha ao baixar resultado {index}: {error}")
     return saved
 
 
@@ -237,23 +286,21 @@ def _save_occurrences(
 
 
 def search(page: Page, keyword: str, date_value: str) -> None:
-    page.goto(URL, wait_until="domcontentloaded")
-    page.get_by_role("textbox", name="Digite").fill(keyword)
-    formatted_date = date_as_br(date_value)
-    page.get_by_role("textbox", name="Data inicial").fill(formatted_date)
-    page.get_by_role("textbox", name="Data final").fill(formatted_date)
-    page.get_by_role("button", name="Buscar").click()
-    page.wait_for_timeout(750)
-
-    next_page = page.get_by_text("»", exact=True)
     saved_editions: dict[str, Path] = {}
     seen_pages: set[str] = set()
     seen_materials: set[str] = set()
     native_occurrences: dict[str, list[tuple[int, str]]] = {}
     failed_page_editions: set[str] = set()
-    for _ in range(10_000):
-        _download_current_page(
+
+    for page_number in range(1, MAX_SEARCH_PAGES + 1):
+        material_ids, total, page_size, result_count = _search_page(
+            _get_json(page, _search_url(keyword, date_value, page_number))
+        )
+        if result_count == 0:
+            break
+        _download_search_page(
             page,
+            material_ids,
             keyword,
             date_value,
             saved_editions,
@@ -262,7 +309,7 @@ def search(page: Page, keyword: str, date_value: str) -> None:
             native_occurrences,
             failed_page_editions,
         )
-        if not click_next(next_page):
+        if page_number * page_size >= total:
             break
 
     _save_occurrences(

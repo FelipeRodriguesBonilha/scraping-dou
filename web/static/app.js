@@ -1,7 +1,6 @@
 const form = document.querySelector("#search-form");
 const dateInput = document.querySelector("#date");
 const keywordsInput = document.querySelector("#keywords");
-const showBrowserInput = document.querySelector("#show-browser");
 const submitButton = document.querySelector("#submit-button");
 const refreshButton = document.querySelector("#refresh-button");
 const message = document.querySelector("#form-message");
@@ -31,6 +30,38 @@ function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(value) {
+  const matchedDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+  if (!matchedDate) return value || "";
+  const [, year, month, day] = matchedDate;
+  return `${day}/${month}/${year}`;
+}
+
+const windows1252Bytes = new Map([
+  ["€", 0x80], ["‚", 0x82], ["ƒ", 0x83], ["„", 0x84], ["…", 0x85],
+  ["†", 0x86], ["‡", 0x87], ["ˆ", 0x88], ["‰", 0x89], ["Š", 0x8a],
+  ["‹", 0x8b], ["Œ", 0x8c], ["Ž", 0x8e], ["‘", 0x91], ["’", 0x92],
+  ["“", 0x93], ["”", 0x94], ["•", 0x95], ["–", 0x96], ["—", 0x97],
+  ["˜", 0x98], ["™", 0x99], ["š", 0x9a], ["›", 0x9b], ["œ", 0x9c],
+  ["ž", 0x9e], ["Ÿ", 0x9f],
+]);
+
+const mojibakeSequence = /(?:Ã[\u0080-\u00bf]|Â[\u0080-\u00bf]|â[\u0080-\u00bf€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]{2})/g;
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+function normalizeLogText(value) {
+  return String(value || "").replace(mojibakeSequence, (sequence) => {
+    const bytes = Uint8Array.from(sequence, (character) => (
+      windows1252Bytes.get(character) ?? character.charCodeAt(0)
+    ));
+    try {
+      return utf8Decoder.decode(bytes);
+    } catch {
+      return sequence;
+    }
+  });
 }
 
 function statusLabel(status) {
@@ -74,17 +105,17 @@ function updateStatus(job) {
     const detail = activity
       ? ` Último log às ${activity}.`
       : " Aguardando o primeiro log do processo.";
-    statusSummary.textContent = `Coleta em andamento para ${job.date}${elapsed ? ` há ${elapsed}` : ""}. Os arquivos aparecerão abaixo assim que forem salvos.${detail}`;
+    statusSummary.textContent = `Coleta em andamento para ${formatDate(job.date)}${elapsed ? ` há ${elapsed}` : ""}. Os arquivos aparecerão abaixo assim que forem salvos.${detail}`;
   } else if (status === "finished") {
     const result = job.returncode === 0 ? "concluída sem falhas" : "concluída com avisos";
-    statusSummary.textContent = `Coleta ${result} (${job.date || "data não informada"}).`;
+    statusSummary.textContent = `Coleta ${result} (${formatDate(job.date) || "data não informada"}).`;
   } else if (status === "failed") {
     statusSummary.textContent = `A coleta não pôde ser iniciada: ${job.error || "erro desconhecido"}.`;
   } else {
     statusSummary.textContent = "Nenhuma coleta iniciada nesta sessão.";
   }
 
-  const output = (job.logs || []).join("\n");
+  const output = (job.logs || []).map(normalizeLogText).join("\n");
   logs.hidden = !output;
   logs.textContent = output;
   if (output) logs.scrollTop = logs.scrollHeight;
@@ -122,7 +153,7 @@ function renderResults(files, date) {
     empty.className = "empty-results";
     empty.textContent = "Nenhum PDF ou texto de ocorrência foi encontrado para esta data.";
     results.append(empty);
-    resultsSummary.textContent = `0 arquivos em ${date}.`;
+    resultsSummary.textContent = `0 arquivos em ${formatDate(date)}.`;
     return;
   }
 
@@ -143,7 +174,7 @@ function renderResults(files, date) {
     group.append(heading, list);
     results.append(group);
   }
-  resultsSummary.textContent = `${files.length} arquivo${files.length === 1 ? "" : "s"} em ${date}.`;
+  resultsSummary.textContent = `${files.length} arquivo${files.length === 1 ? "" : "s"} em ${formatDate(date)}.`;
 }
 
 async function refreshResults() {
@@ -183,7 +214,6 @@ form.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         date: dateInput.value,
         keywords: keywordsInput.value,
-        headless: !showBrowserInput.checked,
       }),
     });
     updateStatus(job);

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+from pathlib import Path
 import re
 from typing import Iterable
 from urllib.parse import urlencode
@@ -7,56 +9,86 @@ from urllib.parse import urlencode
 from playwright.sync_api import Page, Playwright
 
 from scrapers.common import (
+    date_as_br,
     is_enabled,
     run_for_keywords,
     save_download,
+    save_occurrence_metadata,
     scrape_with_playwright,
 )
 
 
 STATE = "MA"
 URL = "https://diariooficial.ma.gov.br/index.php"
+PDF_DOWNLOAD_URL = "https://diariooficial.ma.gov.br/download.php"
 MAX_LOAD_MORE = 10_000
+DOWNLOAD_TIMEOUT_MS = 120_000
+ISSUE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-def _close_modal(page: Page) -> None:
-    close_button = page.locator("#gridSystemModal [data-dismiss='modal']").last
-    try:
-        if close_button.is_visible():
-            close_button.click()
-            page.wait_for_timeout(200)
-    except Exception:
-        pass
+class _ResponseDownload:
+    def __init__(self, content: bytes, filename: str) -> None:
+        self._content = content
+        self.suggested_filename = filename
+
+    def save_as(self, target: str | Path) -> None:
+        Path(target).write_bytes(self._content)
 
 
-def _download_result(page: Page, result, keyword: str, date_value: str) -> None:
-    result.click()
-    download_button = page.locator("#downloadPDF")
-    download_button.wait_for(state="visible", timeout=15_000)
-
-    existing_pages = set(page.context.pages)
-    try:
-        with page.expect_download(timeout=30_000) as download_info:
-            download_button.click()
-        save_download(
-            download_info.value,
-            STATE,
-            keyword,
-            date_value=date_value,
-        )
-    finally:
-        for popup in page.context.pages:
-            if popup not in existing_pages:
-                popup.close()
-        _close_modal(page)
-
-
-def _issue_key(result, index: int) -> str:
+def _issue_id(result) -> str | None:
     values = re.findall(r"'([^']*)'", result.get_attribute("onclick") or "")
-    if len(values) >= 3 and values[2]:
-        return values[2]
-    href = result.get_attribute("href") or ""
-    return href or f"resultado-{index}"
+    if len(values) < 3:
+        return None
+    candidate = values[2].strip()
+    return candidate if ISSUE_ID_PATTERN.fullmatch(candidate) else None
+
+
+def _result_occurrence(result, keyword: str, date_value: str) -> tuple[str, dict[str, str]] | None:
+    values = re.findall(r"'([^']*)'", result.get_attribute("onclick") or "")
+    issue_id = _issue_id(result)
+    if issue_id is None or len(values) < 5:
+        return None
+
+    page = values[4].strip()
+    if page.isdigit():
+        page = str(int(page))
+    else:
+        page = ""
+    return issue_id, {
+        "date": date_as_br(date_value),
+        "section": html.unescape(values[0]).strip(),
+        "page": page,
+        "term": keyword,
+    }
+
+
+def _result_key(result, index: int) -> str:
+    return _issue_id(result) or result.get_attribute("href") or f"resultado-{index}"
+
+
+def _pdf_content(response, issue_id: str) -> bytes:
+    content = response.body()
+    if response.status != 200:
+        raise RuntimeError(f"PDF da edição {issue_id} indisponível (HTTP {response.status})")
+    if not content.startswith(b"%PDF"):
+        raise RuntimeError(f"resposta da edição {issue_id} não é um PDF")
+    return content
+
+
+def _download_result(page: Page, issue_id: str, keyword: str, date_value: str) -> Path:
+    response = page.context.request.get(
+        f"{PDF_DOWNLOAD_URL}?{urlencode({'arq': issue_id})}",
+        headers={"Referer": URL},
+        timeout=DOWNLOAD_TIMEOUT_MS,
+    )
+    return save_download(
+        _ResponseDownload(_pdf_content(response, issue_id), f"DOEMA-{issue_id}.pdf"),
+        STATE,
+        keyword,
+        date_value=date_value,
+        extract_occurrences=False,
+        deduplicate_identical=True,
+    )
 
 
 def _wait_for_first_batch(page: Page) -> None:
@@ -80,22 +112,24 @@ def search(page: Page, keyword: str, date_value: str) -> None:
     page.goto(f"{URL}?{query}", wait_until="domcontentloaded")
     _wait_for_first_batch(page)
 
-    seen_issues: set[str] = set()
+    occurrences_by_issue: dict[str, list[dict[str, str]]] = {}
+    failed_issues: list[str] = []
     processed = 0
     for _ in range(MAX_LOAD_MORE):
         results = page.locator("a.btnVermais")
         total = results.count()
         for index in range(processed, total):
             result = results.nth(index)
-            issue_key = _issue_key(result, index)
-            if issue_key in seen_issues:
-                continue
+            issue_key = _result_key(result, index)
             try:
-                _download_result(page, result, keyword, date_value)
-                seen_issues.add(issue_key)
+                occurrence = _result_occurrence(result, keyword, date_value)
+                if occurrence is None:
+                    raise RuntimeError("dados da ocorrência não encontrados")
+                issue_id, record = occurrence
+                occurrences_by_issue.setdefault(issue_id, []).append(record)
             except Exception as error:
-                print(f"[{STATE}] falha ao baixar resultado {index + 1}: {error}")
-                _close_modal(page)
+                failed_issues.append(issue_key)
+                print(f"[{STATE}] falha ao ler ocorrência {index + 1}: {error}")
         processed = total
 
         load_more = page.locator("#btnList")
@@ -110,6 +144,25 @@ def search(page: Page, keyword: str, date_value: str) -> None:
             }""",
             arg=processed,
             timeout=30_000,
+        )
+
+    for index, (issue_id, records) in enumerate(occurrences_by_issue.items(), start=1):
+        try:
+            pdf_path = _download_result(page, issue_id, keyword, date_value)
+            save_occurrence_metadata(
+                STATE,
+                keyword,
+                pdf_path.name,
+                records,
+                date_value=date_value,
+            )
+        except Exception as error:
+            failed_issues.append(issue_id)
+            print(f"[{STATE}] falha ao baixar edição {index}: {error}")
+
+    if failed_issues:
+        raise RuntimeError(
+            f"{len(failed_issues)} edição(ões) não puderam ser baixadas para '{keyword}'"
         )
 
 

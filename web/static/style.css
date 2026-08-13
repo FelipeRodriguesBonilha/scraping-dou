@@ -29,9 +29,6 @@ input[type="date"], textarea { width: 100%; border: 1px solid #bdc8da; border-ra
 input[type="date"] { max-width: 255px; }
 textarea { resize: vertical; line-height: 1.45; }
 input:focus, textarea:focus { outline: 3px solid rgba(58, 111, 206, .18); border-color: #3a6fce; }
-.checkbox-row { display: flex; align-items: center; gap: 9px; font-weight: 600; }
-.checkbox-row input { width: 17px; height: 17px; accent-color: #285fb9; }
-
 .form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
 button { appearance: none; border: 0; border-radius: 9px; padding: 12px 16px; background: #285fb9; color: #fff; cursor: pointer; font: inherit; font-weight: 750; transition: background .15s ease, transform .15s ease; }
 button:hover:not(:disabled) { background: #1f519f; transform: translateY(-1px); }

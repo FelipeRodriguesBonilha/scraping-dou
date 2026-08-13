@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import hashlib
 from pathlib import Path
 import re
 from tempfile import NamedTemporaryFile
@@ -232,6 +233,58 @@ def _next_available_path(target_dir: Path, original_name: str) -> Path:
     return target
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _same_filename_candidates(target_dir: Path, original_name: str) -> list[Path]:
+    original = Path(original_name)
+    numbered_name = re.compile(
+        rf"^{re.escape(original.stem)}-(?:[2-9]|[1-9]\d+){re.escape(original.suffix)}$",
+        re.IGNORECASE,
+    )
+    candidates = [
+        path
+        for path in target_dir.iterdir()
+        if path.is_file()
+        and (path.name.casefold() == original.name.casefold() or numbered_name.fullmatch(path.name))
+    ]
+    return sorted(
+        candidates,
+        key=lambda path: (
+            path.name.casefold() != original.name.casefold(),
+            path.name.casefold(),
+        ),
+    )
+
+
+def _save_deduplicated_download(download, target_dir: Path, original_name: str) -> tuple[Path, bool]:
+    with NamedTemporaryFile(
+        dir=target_dir,
+        prefix=".download-",
+        suffix=".part",
+        delete=False,
+    ) as temporary:
+        temporary_path = Path(temporary.name)
+
+    try:
+        download.save_as(temporary_path)
+        content_hash = _file_sha256(temporary_path)
+        for candidate in _same_filename_candidates(target_dir, original_name):
+            if _file_sha256(candidate) == content_hash:
+                return candidate, False
+
+        target = _next_available_path(target_dir, original_name)
+        temporary_path.replace(target)
+        return target, True
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def _write_occurrence_text(
     target: Path,
     *,
@@ -302,17 +355,18 @@ def save_occurrence_metadata(
     date_value: date | datetime | str | None = None,
 ) -> Path:
     normalized: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for record in records:
         edition_date = str(record.get("date") or "").strip()
         section = str(record.get("section") or "").strip()
         term = str(record.get("term") or "").strip()
-        key = (edition_date, section, term)
+        page = str(record.get("page") or "").strip()
+        key = (edition_date, section, term, page)
         if key in seen:
             continue
         seen.add(key)
         normalized.append(
-            {"date": edition_date, "section": section, "term": term}
+            {"date": edition_date, "section": section, "term": term, "page": page}
         )
 
     if not normalized:
@@ -322,20 +376,25 @@ def save_occurrence_metadata(
     target_dir = occurrence_dir(state, keyword, date_value)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{_safe_component(Path(source_name).stem, 'diario')}__ocorrencias.txt"
+    pages = list(dict.fromkeys(record["page"] for record in normalized if record["page"]))
     lines = [
         f"Arquivo de origem: {source_name}",
         f"Busca: {keyword}",
-        "Páginas de ocorrência: não informadas pelo portal",
+        "Páginas de ocorrência: "
+        + (", ".join(pages) if pages else "não informadas pelo portal"),
         "",
     ]
     for index, record in enumerate(normalized, start=1):
         lines.append(f"===== OCORRÊNCIA {index} =====")
         lines.append(f"Data da edição: {record['date'] or 'não informada'}")
         lines.append(f"Seção: {record['section'] or 'não informada'}")
+        if record["page"]:
+            lines.append(f"Página: {record['page']}")
         lines.append(f"Termo informado pelo portal: {record['term'] or keyword}")
         lines.append("")
     target.write_text("\n".join(lines), encoding="utf-8")
-    print(f"[{state.upper()}] ocorrências salvas: {target} (páginas não informadas)")
+    page_detail = ", ".join(pages) if pages else "não informadas"
+    print(f"[{state.upper()}] ocorrências salvas: {target} (páginas: {page_detail})")
     return target
 
 
@@ -374,14 +433,23 @@ def save_download(
     *,
     date_value: date | datetime | str | None = None,
     extract_occurrences: bool = True,
+    deduplicate_identical: bool = False,
 ) -> Path:
     target_dir = download_dir(state, keyword, date_value)
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    target = _next_available_path(target_dir, _pdf_filename(download, filename))
+    original_name = _pdf_filename(download, filename)
+    if deduplicate_identical:
+        target, saved = _save_deduplicated_download(download, target_dir, original_name)
+    else:
+        target = _next_available_path(target_dir, original_name)
+        download.save_as(target)
+        saved = True
 
-    download.save_as(target)
-    print(f"[{state.upper()}] salvo: {target}")
+    if saved:
+        print(f"[{state.upper()}] salvo: {target}")
+    else:
+        print(f"[{state.upper()}] arquivo idêntico já existe: {target}")
     if extract_occurrences:
         save_occurrence_pages(target, keyword)
     return target

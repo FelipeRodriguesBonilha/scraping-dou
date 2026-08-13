@@ -85,7 +85,10 @@ def _search_results(page: Page, keyword: str) -> list[dict]:
     results = payload.get("resposta", [])
     if not isinstance(results, list):
         raise RuntimeError("lista de resultados do PI em formato inesperado")
-    print(f"[{STATE}] portal retornou {len(results)} ocorrência(s) para '{keyword}'")
+    print(
+        f"[{STATE}] portal retornou {len(results)} resultado(s) antes do filtro "
+        f"de data para '{keyword}'"
+    )
     return [result for result in results if isinstance(result, dict)]
 
 
@@ -125,7 +128,7 @@ def _download_pdf(
             extract_occurrences=False,
         )
     except Exception as error:
-        print(f"[{STATE}] falha ao baixar resultado {index}: {error}")
+        print(f"[{STATE}] falha ao baixar edição {index}: {error}")
         return None
 
 
@@ -150,9 +153,10 @@ def search(page: Page, keyword: str, date_value: str) -> None:
         href = urljoin(PDF_BASE_URL, f"files/diarios/anexo/{attachment}")
         occurrences_by_issue.setdefault(href, []).append(_occurrence_metadata(result))
 
+    selected_occurrences = sum(len(records) for records in occurrences_by_issue.values())
     print(
-        f"[{STATE}] {len(occurrences_by_issue)} edição(ões) encontrada(s) "
-        f"para {date_value}"
+        f"[{STATE}] após filtrar pela data {date_value}: {selected_occurrences} "
+        f"ocorrência(s) em {len(occurrences_by_issue)} edição(ões)"
     )
     for index, (href, records) in enumerate(occurrences_by_issue.items(), start=1):
         pdf_path = _download_pdf(page, href, keyword, date_value, index)
@@ -167,7 +171,7 @@ def search(page: Page, keyword: str, date_value: str) -> None:
                 date_value=date_value,
             )
         except Exception as error:
-            print(f"[{STATE}] falha ao salvar ocorrências do resultado {index}: {error}")
+            print(f"[{STATE}] falha ao salvar ocorrências da edição {index}: {error}")
 
 
 def scrape(

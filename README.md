@@ -86,25 +86,40 @@ qualquer uma delas.
 
 BA e SE não aparecem no roteiro porque continuam dependendo de login.
 
-## Interface local
+## Interface web e publicação
 
-Há uma interface local para escolher a data, informar termos opcionais e ver
-os PDFs e textos de ocorrência salvos. Ela não inicia uma coleta sozinha.
+A interface permite escolher a data, informar termos opcionais e ver os PDFs e
+textos de ocorrência salvos. Ela executa as coletas sem abrir o navegador no
+servidor.
+
+Antes de iniciá-la, defina um usuário e uma senha em variáveis de ambiente. Não
+inclua a senha em `config.py`, no repositório ou em arquivos públicos.
 
 ```powershell
+$env:DOU_WEB_USERNAME = "alfa"
+$env:DOU_WEB_PASSWORD = "troque-por-uma-senha-forte-e-unica"
 python web/server.py
 ```
 
-Abra `http://127.0.0.1:8000` no navegador. Deixe as palavras-chave em branco
-para usar `config.KEYWORDS`; uma palavra por linha substitui essa lista apenas
-na coleta atual. A opção **Mostrar o navegador** executa a coleta com
-`--headed`.
+Abra `http://127.0.0.1:8000` no navegador e informe essas credenciais quando
+solicitado. A autenticação protege a página, a API e os arquivos baixados.
+Deixe as palavras-chave em branco para usar `config.KEYWORDS`; uma palavra por
+linha substitui essa lista apenas na coleta atual.
 
-O servidor só atende o endereço local e executa `main.py` em um processo filho
-sem usar shell. Enquanto a coleta estiver ativa, a página mostra o andamento,
-o tempo decorrido e o horário do último log; ela também atualiza a lista de
-arquivos da data selecionada. PDFs abrem no navegador e os
-arquivos `.txt` em `ocorrencias` exibem as páginas encontradas.
+Para desenvolvimento local sem senha, use explicitamente
+`python web/server.py --no-auth`. Essa opção só funciona em endereços locais e
+não pode ser usada ao expor o serviço na rede.
+
+Para publicar, mantenha o servidor Python em `127.0.0.1` e publique-o por trás
+de um proxy reverso com HTTPS (por exemplo, Caddy ou Nginx). A autenticação
+Basic só protege a senha em trânsito quando a conexão externa usa HTTPS. Ao
+trocar as variáveis de ambiente e reiniciar o servidor, a senha compartilhada é
+alterada para todos os usuários.
+
+Enquanto a coleta estiver ativa, a página mostra o andamento, o tempo decorrido
+e o horário do último log; ela também atualiza a lista de arquivos da data
+selecionada. PDFs abrem no navegador e os arquivos `.txt` em `ocorrencias`
+exibem as páginas encontradas.
 
 ## Verificação
 

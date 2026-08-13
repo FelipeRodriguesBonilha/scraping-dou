@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
+import hmac
+import ipaddress
 import json
 import mimetypes
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,12 +28,71 @@ MAX_REQUEST_BYTES = 64 * 1024
 MAX_KEYWORDS = 50
 MAX_KEYWORD_LENGTH = 300
 ALLOWED_RESULT_SUFFIXES = {".pdf", ".txt"}
+AUTH_USERNAME_ENV = "DOU_WEB_USERNAME"
+AUTH_PASSWORD_ENV = "DOU_WEB_PASSWORD"
+AUTH_REALM = "Scraping DOU"
 
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+
+
+@dataclass(frozen=True)
+class BasicAuth:
+    username: str
+    password: str
+
+    def matches(self, authorization: str | None) -> bool:
+        if not authorization:
+            return False
+
+        scheme, separator, token = authorization.partition(" ")
+        if scheme.lower() != "basic" or not separator or not token:
+            return False
+
+        try:
+            decoded = base64.b64decode(token.encode("ascii"), validate=True).decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError, binascii.Error):
+            return False
+
+        username, separator, password = decoded.partition(":")
+        if not separator:
+            return False
+
+        username_matches = hmac.compare_digest(
+            username.encode("utf-8"), self.username.encode("utf-8")
+        )
+        password_matches = hmac.compare_digest(
+            password.encode("utf-8"), self.password.encode("utf-8")
+        )
+        return username_matches & password_matches
+
+
+def is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def auth_from_environment(host: str, no_auth: bool = False) -> BasicAuth | None:
+    if no_auth:
+        if not is_loopback_host(host):
+            raise ValueError("--no-auth só pode ser usado com um endereço local (loopback).")
+        return None
+
+    username = os.environ.get(AUTH_USERNAME_ENV)
+    password = os.environ.get(AUTH_PASSWORD_ENV)
+    if not username or not password:
+        raise ValueError(
+            f"Defina {AUTH_USERNAME_ENV} e {AUTH_PASSWORD_ENV} antes de iniciar o servidor."
+        )
+    return BasicAuth(username=username, password=password)
 
 
 def normalize_date(value: object | None) -> str:
@@ -139,7 +204,7 @@ class ScrapeJob:
         with self._lock:
             return {**self._state, "logs": list(self._logs)}
 
-    def start(self, date_value: str, keywords: list[str], headless: bool) -> dict[str, Any]:
+    def start(self, date_value: str, keywords: list[str]) -> dict[str, Any]:
         with self._lock:
             if self._state["status"] == "running":
                 raise RuntimeError("Já existe uma coleta em andamento.")
@@ -148,7 +213,7 @@ class ScrapeJob:
                 "status": "running",
                 "date": date_value,
                 "keywords": keywords,
-                "headless": headless,
+                "headless": True,
                 "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
                 "lastActivityAt": None,
                 "endedAt": None,
@@ -158,14 +223,14 @@ class ScrapeJob:
             self._logs.clear()
             self._thread = threading.Thread(
                 target=self._run,
-                args=(date_value, keywords, headless),
+                args=(date_value, keywords),
                 name="scraping-dou-job",
                 daemon=True,
             )
             self._thread.start()
             return {**self._state, "logs": []}
 
-    def _run(self, date_value: str, keywords: list[str], headless: bool) -> None:
+    def _run(self, date_value: str, keywords: list[str]) -> None:
         arguments = [
             sys.executable,
             "-u",
@@ -174,10 +239,10 @@ class ScrapeJob:
         ]
         for keyword in keywords:
             arguments.append(f"--keyword={keyword}")
-        if not headless:
-            arguments.append("--headed")
-
         try:
+            environment = os.environ.copy()
+            environment["PYTHONIOENCODING"] = "utf-8"
+            environment["PYTHONUTF8"] = "1"
             process = subprocess.Popen(
                 arguments,
                 cwd=ROOT,
@@ -188,6 +253,7 @@ class ScrapeJob:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=environment,
             )
             with self._lock:
                 self._process = process
@@ -220,6 +286,17 @@ class ScrapeJob:
 JOB = ScrapeJob()
 
 
+class AppServer(ThreadingHTTPServer):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        request_handler_class: type[BaseHTTPRequestHandler],
+        auth: BasicAuth | None,
+    ) -> None:
+        super().__init__(server_address, request_handler_class)
+        self.auth = auth
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "ScrapingDOU/1.0"
 
@@ -227,6 +304,9 @@ class AppHandler(BaseHTTPRequestHandler):
         return
 
     def do_GET(self) -> None:
+        if not self._require_authentication():
+            return
+
         parsed = urlsplit(self.path)
         try:
             if parsed.path == "/":
@@ -256,6 +336,9 @@ class AppHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": "Não foi possível concluir a solicitação."})
 
     def do_POST(self) -> None:
+        if not self._require_authentication():
+            return
+
         if urlsplit(self.path).path != "/api/scrape":
             self._send_json(404, {"error": "Rota não encontrada."})
             return
@@ -265,15 +348,27 @@ class AppHandler(BaseHTTPRequestHandler):
             date_value = normalize_date(payload.get("date"))
             keywords = parse_keywords(payload.get("keywords"))
             headless = payload.get("headless", True)
-            if not isinstance(headless, bool):
-                raise ValueError("O campo 'headless' deve ser verdadeiro ou falso.")
-            self._send_json(202, JOB.start(date_value, keywords, headless))
+            if headless is not True:
+                raise ValueError("A interface executa a coleta sem abrir o navegador.")
+            self._send_json(202, JOB.start(date_value, keywords))
         except RuntimeError as error:
             self._send_json(409, {"error": str(error)})
         except ValueError as error:
             self._send_json(400, {"error": str(error)})
         except Exception:
             self._send_json(500, {"error": "Não foi possível iniciar a coleta."})
+
+    def _require_authentication(self) -> bool:
+        auth = getattr(self.server, "auth", None)
+        if auth is None or auth.matches(self.headers.get("Authorization")):
+            return True
+
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", f'Basic realm="{AUTH_REALM}", charset="UTF-8"')
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        return False
 
     def _read_json_body(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length")
@@ -340,12 +435,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inicia a interface local dos diários oficiais.")
     parser.add_argument("--host", default="127.0.0.1", help="Endereço local (padrão: 127.0.0.1).")
     parser.add_argument("--port", default=8000, type=int, help="Porta HTTP local (padrão: 8000).")
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="Desativa a senha somente para testes em endereço local.",
+    )
     return parser.parse_args()
 
 
-def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
-    server = ThreadingHTTPServer((host, port), AppHandler)
+def serve(host: str = "127.0.0.1", port: int = 8000, no_auth: bool = False) -> None:
+    auth = auth_from_environment(host, no_auth)
+    server = AppServer((host, port), AppHandler, auth)
     print(f"Interface disponível em http://{host}:{port}")
+    if auth is None:
+        print("Autenticação desativada somente para uso local.")
+    else:
+        print("Autenticação por usuário e senha ativada.")
     print("Use Ctrl+C para encerrar o servidor.")
     try:
         server.serve_forever()
@@ -356,4 +461,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
 
 if __name__ == "__main__":
     arguments = parse_args()
-    serve(arguments.host, arguments.port)
+    try:
+        serve(arguments.host, arguments.port, arguments.no_auth)
+    except ValueError as error:
+        raise SystemExit(f"Erro de configuração: {error}") from error
