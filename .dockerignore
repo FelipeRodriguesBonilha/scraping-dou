@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+downloads
+.env
+secrets
+.tmp_*.html
+Thumbs.db
+.DS_Store

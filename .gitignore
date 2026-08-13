@@ -7,5 +7,6 @@ htmlcov/
 .tmp_*.html
 downloads/
 .env
+secrets/
 .DS_Store
 Thumbs.db

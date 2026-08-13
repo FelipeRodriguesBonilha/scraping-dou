@@ -110,16 +110,97 @@ Para desenvolvimento local sem senha, use explicitamente
 `python web/server.py --no-auth`. Essa opção só funciona em endereços locais e
 não pode ser usada ao expor o serviço na rede.
 
-Para publicar, mantenha o servidor Python em `127.0.0.1` e publique-o por trás
-de um proxy reverso com HTTPS (por exemplo, Caddy ou Nginx). A autenticação
-Basic só protege a senha em trânsito quando a conexão externa usa HTTPS. Ao
-trocar as variáveis de ambiente e reiniciar o servidor, a senha compartilhada é
-alterada para todos os usuários.
+Para publicar, use a configuração Docker incluída neste projeto. Ela mantém a
+porta do Python fora da internet, persiste os resultados e usa o Caddy para
+HTTPS. A autenticação Basic só protege a senha em trânsito quando a conexão
+externa usa HTTPS.
 
 Enquanto a coleta estiver ativa, a página mostra o andamento, o tempo decorrido
 e o horário do último log; ela também atualiza a lista de arquivos da data
 selecionada. PDFs abrem no navegador e os arquivos `.txt` em `ocorrencias`
 exibem as páginas encontradas.
+
+### Publicação com Docker em uma VPS
+
+A configuração de produção usa esta arquitetura:
+
+```text
+Internet HTTPS -> Caddy (portas 80/443) -> interface Python (rede Docker)
+                                                 |
+                                          volume `downloads`
+```
+
+A porta `8000` não é publicada no host: somente o Caddy recebe tráfego externo.
+Antes da instalação, crie um registro DNS `A` (por exemplo,
+`dou.seudominio.com`) apontando para o IP público da VPS. Se houver um registro
+`AAAA`, ele também deve apontar corretamente para a VPS ou ser removido. Libere
+as portas TCP `22`, `80` e `443` no firewall da Hostinger e da VPS; **não abra a
+porta 8000**.
+
+Em uma VPS Ubuntu, instale o Docker Engine e o plugin Docker Compose conforme a
+[documentação oficial do Docker](https://docs.docker.com/engine/install/ubuntu/).
+Depois, execute:
+
+```bash
+git clone https://github.com/FelipeRodriguesBonilha/scraping-dou.git
+cd scraping-dou
+cp .env.example .env
+nano .env
+```
+
+No `.env`, informe o domínio público e um e-mail para os avisos de renovação do
+certificado:
+
+```dotenv
+DOU_DOMAIN=dou.seudominio.com
+ACME_EMAIL=infra@seudominio.com
+```
+
+Crie as credenciais da interface fora do Git. Elas são montadas como segredos
+somente no container da aplicação:
+
+```bash
+sudo install -d -m 700 secrets
+sudo nano secrets/dou_web_username
+sudo nano secrets/dou_web_password
+sudo chmod 600 secrets/dou_web_username secrets/dou_web_password
+```
+
+Use uma senha longa e exclusiva. Em seguida, valide e inicie os containers:
+
+```bash
+sudo docker compose config --quiet
+sudo docker compose build --pull
+sudo docker compose up -d --remove-orphans
+sudo docker compose ps
+sudo docker compose logs -f scraping-dou caddy
+```
+
+Com o DNS e as portas `80`/`443` ativos, o Caddy emite e renova o certificado
+HTTPS automaticamente. Abra `https://dou.seudominio.com` e entre com o usuário
+e a senha criados acima. Os PDFs continuam no volume Docker `downloads`, mesmo
+se o container for recriado.
+
+Para atualizar a aplicação na VPS:
+
+```bash
+git pull --ff-only
+sudo docker compose build --pull
+sudo docker compose up -d --remove-orphans
+```
+
+Para trocar a senha, altere o arquivo `secrets/dou_web_password` e recrie apenas
+o serviço da aplicação:
+
+```bash
+sudo docker compose up -d --force-recreate scraping-dou
+```
+
+O Chromium roda sem interface gráfica no container. A imagem instala a mesma
+versão do navegador exigida pelo `playwright` do projeto e executa a coleta como
+usuário sem privilégios. Veja também a [documentação do Playwright para
+Docker](https://playwright.dev/python/docs/docker) e a [documentação do Caddy
+sobre HTTPS automático](https://caddyserver.com/docs/automatic-https).
 
 ## Verificação
 

@@ -1,0 +1,16 @@
+{
+    email {$ACME_EMAIL}
+}
+
+{$DOU_DOMAIN} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+    }
+
+    reverse_proxy scraping-dou:8000
+}

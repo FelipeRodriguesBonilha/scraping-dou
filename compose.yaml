@@ -1,0 +1,72 @@
+name: scraping-dou
+
+services:
+  scraping-dou:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    expose:
+      - "8000"
+    environment:
+      DOU_WEB_USERNAME_FILE: /run/secrets/dou_web_username
+      DOU_WEB_PASSWORD_FILE: /run/secrets/dou_web_password
+    volumes:
+      - downloads:/app/downloads
+    secrets:
+      - dou_web_username
+      - dou_web_password
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./docker/seccomp_profile.json
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import http.client, sys; client = http.client.HTTPConnection('127.0.0.1', 8000, timeout=5); client.request('GET', '/'); sys.exit(0 if client.getresponse().status == 401 else 1)\"",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      scraping-dou:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOU_DOMAIN: ${DOU_DOMAIN:?Defina DOU_DOMAIN no arquivo .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Defina ACME_EMAIL no arquivo .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+secrets:
+  dou_web_username:
+    file: ./secrets/dou_web_username
+  dou_web_password:
+    file: ./secrets/dou_web_password
+
+volumes:
+  downloads:
+  caddy_data:
+  caddy_config:
