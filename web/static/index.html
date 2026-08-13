@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Diários Oficiais — Pesquisa</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">SCRAPING-DOU</p>
+        <h1>Pesquisa nos Diários Oficiais</h1>
+        <p>Escolha a data, opcionalmente informe termos, e acompanhe os arquivos encontrados.</p>
+      </header>
+
+      <section class="panel" aria-labelledby="search-title">
+        <div class="section-heading">
+          <h2 id="search-title">Nova pesquisa</h2>
+          <p>Com os termos em branco, são usadas as palavras-chave definidas em <code>config.py</code>.</p>
+        </div>
+        <form id="search-form">
+          <label>
+            Data da publicação
+            <input id="date" name="date" type="date" required>
+          </label>
+          <label>
+            Palavras-chave <span>(uma por linha, opcional)</span>
+            <textarea id="keywords" name="keywords" rows="6" placeholder="vistoria&#10;vistoria veicular"></textarea>
+          </label>
+          <label class="checkbox-row">
+            <input id="show-browser" name="show-browser" type="checkbox">
+            <span>Mostrar o navegador durante a coleta</span>
+          </label>
+          <div class="form-actions">
+            <button id="submit-button" type="submit">Pesquisar todos os estados</button>
+            <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel status-panel" aria-labelledby="status-title">
+        <div class="section-heading compact">
+          <h2 id="status-title">Andamento</h2>
+          <span id="status-badge" class="status-badge" data-status="idle">Aguardando</span>
+        </div>
+        <p id="status-summary">Nenhuma coleta iniciada nesta sessão.</p>
+        <pre id="logs" class="logs" hidden aria-label="Log da coleta"></pre>
+      </section>
+
+      <section class="panel results-panel" aria-labelledby="results-title">
+        <div class="section-heading compact">
+          <div>
+            <h2 id="results-title">Arquivos encontrados</h2>
+            <p id="results-summary">Escolha uma data para consultar os arquivos já baixados.</p>
+          </div>
+          <button id="refresh-button" class="secondary-button" type="button">Atualizar lista</button>
+        </div>
+        <div id="results" class="results" aria-live="polite"></div>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

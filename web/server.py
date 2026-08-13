@@ -1,0 +1,359 @@
+from __future__ import annotations
+
+import argparse
+from collections import deque
+from datetime import datetime
+import json
+import mimetypes
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import threading
+from typing import Any
+from urllib.parse import parse_qs, quote, unquote, urlsplit
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+ROOT = Path(__file__).resolve().parents[1]
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+DOWNLOADS_DIR = ROOT / "downloads"
+MAX_REQUEST_BYTES = 64 * 1024
+MAX_KEYWORDS = 50
+MAX_KEYWORD_LENGTH = 300
+ALLOWED_RESULT_SUFFIXES = {".pdf", ".txt"}
+
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import config
+
+
+def normalize_date(value: object | None) -> str:
+    text = str(value or config.DATE).strip()
+    if not text:
+        text = config.DATE
+    for pattern in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, pattern).date().isoformat()
+        except ValueError:
+            continue
+    raise ValueError("Use a data no formato YYYY-MM-DD ou DD/MM/YYYY.")
+
+
+def parse_keywords(value: object | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_terms = value.splitlines()
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        raw_terms = value
+    else:
+        raise ValueError("As palavras-chave devem ser texto, uma por linha.")
+
+    terms: list[str] = []
+    for raw_term in raw_terms:
+        term = raw_term.strip()
+        if not term:
+            continue
+        if len(term) > MAX_KEYWORD_LENGTH:
+            raise ValueError("Cada palavra-chave pode ter no máximo 300 caracteres.")
+        if term not in terms:
+            terms.append(term)
+
+    if len(terms) > MAX_KEYWORDS:
+        raise ValueError("Informe no máximo 50 palavras-chave.")
+    return terms
+
+
+def _safe_relative_path(value: str) -> Path | None:
+    try:
+        candidate = (DOWNLOADS_DIR / Path(value)).resolve()
+        root = DOWNLOADS_DIR.resolve()
+        candidate.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if candidate.suffix.lower() not in ALLOWED_RESULT_SUFFIXES or not candidate.is_file():
+        return None
+    return candidate
+
+
+def list_results(date_value: object | None) -> list[dict[str, Any]]:
+    normalized_date = normalize_date(date_value)
+    if not DOWNLOADS_DIR.is_dir():
+        return []
+
+    results: list[dict[str, Any]] = []
+    for state_dir in sorted(DOWNLOADS_DIR.iterdir(), key=lambda item: item.name.upper()):
+        date_dir = state_dir / normalized_date
+        if not state_dir.is_dir() or not date_dir.is_dir():
+            continue
+        for path in sorted(date_dir.rglob("*"), key=lambda item: str(item).casefold()):
+            if not path.is_file() or path.suffix.lower() not in ALLOWED_RESULT_SUFFIXES:
+                continue
+            try:
+                relative = path.resolve().relative_to(DOWNLOADS_DIR.resolve())
+            except (OSError, ValueError):
+                continue
+
+            parts = relative.parts
+
+            if len(parts) < 5:
+                continue
+            kind = "ocorrência" if "ocorrencias" in parts else "PDF"
+            results.append(
+                {
+                    "state": parts[0],
+                    "date": parts[1],
+                    "keyword": parts[2],
+                    "kind": kind,
+                    "name": path.name,
+                    "size": path.stat().st_size,
+                    "url": "/files/" + quote(relative.as_posix()),
+                }
+            )
+
+    return results
+
+
+class ScrapeJob:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._process: subprocess.Popen[str] | None = None
+        self._state: dict[str, Any] = {
+            "status": "idle",
+            "date": None,
+            "keywords": [],
+            "headless": True,
+            "startedAt": None,
+            "lastActivityAt": None,
+            "endedAt": None,
+            "returncode": None,
+            "error": None,
+        }
+        self._logs: deque[str] = deque(maxlen=500)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {**self._state, "logs": list(self._logs)}
+
+    def start(self, date_value: str, keywords: list[str], headless: bool) -> dict[str, Any]:
+        with self._lock:
+            if self._state["status"] == "running":
+                raise RuntimeError("Já existe uma coleta em andamento.")
+
+            self._state = {
+                "status": "running",
+                "date": date_value,
+                "keywords": keywords,
+                "headless": headless,
+                "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "lastActivityAt": None,
+                "endedAt": None,
+                "returncode": None,
+                "error": None,
+            }
+            self._logs.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(date_value, keywords, headless),
+                name="scraping-dou-job",
+                daemon=True,
+            )
+            self._thread.start()
+            return {**self._state, "logs": []}
+
+    def _run(self, date_value: str, keywords: list[str], headless: bool) -> None:
+        arguments = [
+            sys.executable,
+            "-u",
+            str(ROOT / "main.py"),
+            f"--date={date_value}",
+        ]
+        for keyword in keywords:
+            arguments.append(f"--keyword={keyword}")
+        if not headless:
+            arguments.append("--headed")
+
+        try:
+            process = subprocess.Popen(
+                arguments,
+                cwd=ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            with self._lock:
+                self._process = process
+
+            if process.stdout is not None:
+                for line in process.stdout:
+                    with self._lock:
+                        self._logs.append(line.rstrip())
+                        self._state["lastActivityAt"] = datetime.now().astimezone().isoformat(
+                            timespec="seconds"
+                        )
+
+            returncode = process.wait()
+            with self._lock:
+                self._state["status"] = "finished"
+                self._state["returncode"] = returncode
+                self._state["endedAt"] = datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                )
+                self._process = None
+        except Exception as error:
+            with self._lock:
+                self._state["status"] = "failed"
+                self._state["error"] = str(error)
+                self._state["endedAt"] = datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                )
+                self._process = None
+
+JOB = ScrapeJob()
+
+
+class AppHandler(BaseHTTPRequestHandler):
+    server_version = "ScrapingDOU/1.0"
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        parsed = urlsplit(self.path)
+        try:
+            if parsed.path == "/":
+                self._serve_static("index.html")
+            elif parsed.path.startswith("/static/"):
+                self._serve_static(parsed.path.removeprefix("/static/"))
+            elif parsed.path == "/api/config":
+                self._send_json(
+                    200,
+                    {"date": normalize_date(config.DATE), "keywords": config.KEYWORDS},
+                )
+            elif parsed.path == "/api/status":
+                self._send_json(200, JOB.snapshot())
+            elif parsed.path == "/api/files":
+                requested_date = parse_qs(parsed.query).get("date", [config.DATE])[0]
+                self._send_json(
+                    200,
+                    {"date": normalize_date(requested_date), "files": list_results(requested_date)},
+                )
+            elif parsed.path.startswith("/files/"):
+                self._serve_result(unquote(parsed.path.removeprefix("/files/")))
+            else:
+                self._send_json(404, {"error": "Rota não encontrada."})
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+        except Exception:
+            self._send_json(500, {"error": "Não foi possível concluir a solicitação."})
+
+    def do_POST(self) -> None:
+        if urlsplit(self.path).path != "/api/scrape":
+            self._send_json(404, {"error": "Rota não encontrada."})
+            return
+
+        try:
+            payload = self._read_json_body()
+            date_value = normalize_date(payload.get("date"))
+            keywords = parse_keywords(payload.get("keywords"))
+            headless = payload.get("headless", True)
+            if not isinstance(headless, bool):
+                raise ValueError("O campo 'headless' deve ser verdadeiro ou falso.")
+            self._send_json(202, JOB.start(date_value, keywords, headless))
+        except RuntimeError as error:
+            self._send_json(409, {"error": str(error)})
+        except ValueError as error:
+            self._send_json(400, {"error": str(error)})
+        except Exception:
+            self._send_json(500, {"error": "Não foi possível iniciar a coleta."})
+
+    def _read_json_body(self) -> dict[str, Any]:
+        raw_length = self.headers.get("Content-Length")
+        try:
+            content_length = int(raw_length or "0")
+        except ValueError as error:
+            raise ValueError("Content-Length inválido.") from error
+        if content_length <= 0 or content_length > MAX_REQUEST_BYTES:
+            raise ValueError("Envie um JSON de até 64 KB.")
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("Corpo JSON inválido.") from error
+        if not isinstance(payload, dict):
+            raise ValueError("O corpo deve ser um objeto JSON.")
+        return payload
+
+    def _serve_static(self, relative_name: str) -> None:
+        try:
+            path = (STATIC_DIR / relative_name).resolve()
+            path.relative_to(STATIC_DIR.resolve())
+        except (OSError, ValueError):
+            self._send_json(404, {"error": "Arquivo não encontrado."})
+            return
+        if not path.is_file():
+            self._send_json(404, {"error": "Arquivo não encontrado."})
+            return
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if mime_type.startswith("text/") or mime_type in {
+            "application/javascript",
+            "application/json",
+        }:
+            mime_type += "; charset=utf-8"
+        self._send_file(path, mime_type)
+
+    def _serve_result(self, relative_name: str) -> None:
+        path = _safe_relative_path(relative_name)
+        if path is None:
+            self._send_json(404, {"error": "Arquivo de resultado não encontrado."})
+            return
+        mime_type = "application/pdf" if path.suffix.lower() == ".pdf" else "text/plain; charset=utf-8"
+        self._send_file(path, mime_type)
+
+    def _send_file(self, path: Path, content_type: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(path.stat().st_size))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with path.open("rb") as source:
+            shutil.copyfileobj(source, self.wfile)
+
+    def _send_json(self, status: int, body: dict[str, Any]) -> None:
+        encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(encoded)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Inicia a interface local dos diários oficiais.")
+    parser.add_argument("--host", default="127.0.0.1", help="Endereço local (padrão: 127.0.0.1).")
+    parser.add_argument("--port", default=8000, type=int, help="Porta HTTP local (padrão: 8000).")
+    return parser.parse_args()
+
+
+def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
+    server = ThreadingHTTPServer((host, port), AppHandler)
+    print(f"Interface disponível em http://{host}:{port}")
+    print("Use Ctrl+C para encerrar o servidor.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nServidor encerrado.")
+    finally:
+        server.server_close()
+
+if __name__ == "__main__":
+    arguments = parse_args()
+    serve(arguments.host, arguments.port)
