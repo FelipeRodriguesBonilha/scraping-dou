@@ -9,8 +9,10 @@ const statusSummary = document.querySelector("#status-summary");
 const logs = document.querySelector("#logs");
 const results = document.querySelector("#results");
 const resultsSummary = document.querySelector("#results-summary");
+const defaultKeywords = document.querySelector("#default-keywords");
 
 let pollTimer = null;
+let configuredDefaultKeywords = [];
 
 async function request(url, options) {
   const response = await fetch(url, options);
@@ -37,6 +39,33 @@ function formatDate(value) {
   if (!matchedDate) return value || "";
   const [, year, month, day] = matchedDate;
   return `${day}/${month}/${year}`;
+}
+
+function renderDefaultKeywords() {
+  if (keywordsInput.value.trim()) {
+    defaultKeywords.hidden = true;
+    return;
+  }
+
+  const terms = [...new Set(configuredDefaultKeywords
+    .map((keyword) => String(keyword).trim())
+    .filter(Boolean))];
+
+  defaultKeywords.replaceChildren();
+  defaultKeywords.hidden = false;
+  if (!terms.length) {
+    defaultKeywords.textContent = "Nenhuma palavra-chave padrão está configurada no servidor.";
+    return;
+  }
+
+  defaultKeywords.append("Se deixar o campo em branco, a pesquisa usará: ");
+  terms.forEach((term, index) => {
+    if (index) defaultKeywords.append(", ");
+    const item = document.createElement("code");
+    item.textContent = term;
+    defaultKeywords.append(item);
+  });
+  defaultKeywords.append(".");
 }
 
 const windows1252Bytes = new Map([
@@ -227,11 +256,14 @@ form.addEventListener("submit", async (event) => {
 
 refreshButton.addEventListener("click", refreshResults);
 dateInput.addEventListener("change", refreshResults);
+keywordsInput.addEventListener("input", renderDefaultKeywords);
 
 (async function initialize() {
   try {
     const payload = await request("/api/config");
     dateInput.value = payload.date;
+    configuredDefaultKeywords = Array.isArray(payload.keywords) ? payload.keywords : [];
+    renderDefaultKeywords();
     await refreshStatus();
     await refreshResults();
   } catch (error) {
