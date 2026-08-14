@@ -433,7 +433,7 @@ def save_download(
     *,
     date_value: date | datetime | str | None = None,
     extract_occurrences: bool = True,
-    deduplicate_identical: bool = False,
+    deduplicate_identical: bool = True,
 ) -> Path:
     target_dir = download_dir(state, keyword, date_value)
     target_dir.mkdir(parents=True, exist_ok=True)

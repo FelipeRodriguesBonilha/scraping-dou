@@ -5,7 +5,7 @@ import base64
 import binascii
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hmac
 import ipaddress
 import json
@@ -31,12 +31,19 @@ ALLOWED_RESULT_SUFFIXES = {".pdf", ".txt"}
 AUTH_USERNAME_ENV = "DOU_WEB_USERNAME"
 AUTH_PASSWORD_ENV = "DOU_WEB_PASSWORD"
 AUTH_REALM = "Scraping DOU"
+BRAZIL_TIMEZONE = timezone(timedelta(hours=-3), name="BRT")
+RETENTION_DAYS_ENV = "DOU_RETENTION_DAYS"
+DEFAULT_RETENTION_DAYS = 15
+CLEANUP_HOUR = 3
+CLEANUP_MINUTE = 15
+MAINTENANCE_LOCK = threading.RLock()
 
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+from cleanup_downloads import CleanupResult, cleanup_downloads
 
 
 @dataclass(frozen=True)
@@ -95,10 +102,38 @@ def auth_from_environment(host: str, no_auth: bool = False) -> BasicAuth | None:
     return BasicAuth(username=username, password=password)
 
 
+def current_date() -> str:
+    return datetime.now(BRAZIL_TIMEZONE).date().isoformat()
+
+
+def retention_days_from_environment() -> int:
+    raw_value = os.environ.get(RETENTION_DAYS_ENV, str(DEFAULT_RETENTION_DAYS)).strip()
+    try:
+        retention_days = int(raw_value)
+    except ValueError as error:
+        raise ValueError(f"{RETENTION_DAYS_ENV} deve ser um número inteiro.") from error
+    if not 1 <= retention_days <= 365:
+        raise ValueError(f"{RETENTION_DAYS_ENV} deve ficar entre 1 e 365.")
+    return retention_days
+
+
+def seconds_until_next_cleanup(now: datetime | None = None) -> float:
+    local_now = now or datetime.now(BRAZIL_TIMEZONE)
+    next_cleanup = local_now.replace(
+        hour=CLEANUP_HOUR,
+        minute=CLEANUP_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if next_cleanup <= local_now:
+        next_cleanup += timedelta(days=1)
+    return (next_cleanup - local_now).total_seconds()
+
+
 def normalize_date(value: object | None) -> str:
-    text = str(value or config.DATE).strip()
+    text = str(value or current_date()).strip()
     if not text:
-        text = config.DATE
+        text = current_date()
     for pattern in ("%Y-%m-%d", "%d/%m/%Y"):
         try:
             return datetime.strptime(text, pattern).date().isoformat()
@@ -205,30 +240,31 @@ class ScrapeJob:
             return {**self._state, "logs": list(self._logs)}
 
     def start(self, date_value: str, keywords: list[str]) -> dict[str, Any]:
-        with self._lock:
-            if self._state["status"] == "running":
-                raise RuntimeError("Já existe uma coleta em andamento.")
+        with MAINTENANCE_LOCK:
+            with self._lock:
+                if self._state["status"] == "running":
+                    raise RuntimeError("Já existe uma coleta em andamento.")
 
-            self._state = {
-                "status": "running",
-                "date": date_value,
-                "keywords": keywords,
-                "headless": True,
-                "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
-                "lastActivityAt": None,
-                "endedAt": None,
-                "returncode": None,
-                "error": None,
-            }
-            self._logs.clear()
-            self._thread = threading.Thread(
-                target=self._run,
-                args=(date_value, keywords),
-                name="scraping-dou-job",
-                daemon=True,
-            )
-            self._thread.start()
-            return {**self._state, "logs": []}
+                self._state = {
+                    "status": "running",
+                    "date": date_value,
+                    "keywords": keywords,
+                    "headless": True,
+                    "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "lastActivityAt": None,
+                    "endedAt": None,
+                    "returncode": None,
+                    "error": None,
+                }
+                self._logs.clear()
+                self._thread = threading.Thread(
+                    target=self._run,
+                    args=(date_value, keywords),
+                    name="scraping-dou-job",
+                    daemon=True,
+                )
+                self._thread.start()
+                return {**self._state, "logs": []}
 
     def _run(self, date_value: str, keywords: list[str]) -> None:
         arguments = [
@@ -286,6 +322,66 @@ class ScrapeJob:
 JOB = ScrapeJob()
 
 
+def _log_cleanup_result(result: CleanupResult) -> None:
+    for path in result.removed:
+        print(f"[sistema] limpeza automática: removido {path}")
+    for path in result.protected:
+        print(f"[sistema] limpeza automática: preservado por coleta em andamento: {path}")
+    for path, error in result.errors:
+        print(f"[sistema] limpeza automática: falha ao remover {path}: {error}")
+    if not result.candidates:
+        print(
+            "[sistema] limpeza automática: nenhum resultado anterior a "
+            f"{result.cutoff.isoformat()} para remover."
+        )
+
+
+def run_retention_cleanup(retention_days: int) -> CleanupResult:
+    with MAINTENANCE_LOCK:
+        snapshot = JOB.snapshot()
+        protected_dates = (
+            (str(snapshot["date"]),)
+            if snapshot["status"] == "running" and snapshot["date"]
+            else ()
+        )
+        result = cleanup_downloads(
+            DOWNLOADS_DIR,
+            keep_days=retention_days,
+            protected_dates=protected_dates,
+        )
+    _log_cleanup_result(result)
+    return result
+
+
+class RetentionScheduler:
+    def __init__(self, retention_days: int) -> None:
+        self._retention_days = retention_days
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run,
+            name="scraping-dou-retention",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                run_retention_cleanup(self._retention_days)
+            except Exception as error:
+                print(f"[sistema] limpeza automática falhou: {error}")
+            if self._stop_event.wait(seconds_until_next_cleanup()):
+                break
+
+
 class AppServer(ThreadingHTTPServer):
     def __init__(
         self,
@@ -316,12 +412,12 @@ class AppHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/config":
                 self._send_json(
                     200,
-                    {"date": normalize_date(config.DATE), "keywords": config.KEYWORDS},
+                    {"date": current_date(), "keywords": config.KEYWORDS},
                 )
             elif parsed.path == "/api/status":
                 self._send_json(200, JOB.snapshot())
             elif parsed.path == "/api/files":
-                requested_date = parse_qs(parsed.query).get("date", [config.DATE])[0]
+                requested_date = parse_qs(parsed.query).get("date", [current_date()])[0]
                 self._send_json(
                     200,
                     {"date": normalize_date(requested_date), "files": list_results(requested_date)},
@@ -445,18 +541,26 @@ def parse_args() -> argparse.Namespace:
 
 def serve(host: str = "127.0.0.1", port: int = 8000, no_auth: bool = False) -> None:
     auth = auth_from_environment(host, no_auth)
+    retention_days = retention_days_from_environment()
     server = AppServer((host, port), AppHandler, auth)
+    retention_scheduler = RetentionScheduler(retention_days)
     print(f"Interface disponível em http://{host}:{port}")
     if auth is None:
         print("Autenticação desativada somente para uso local.")
     else:
         print("Autenticação por usuário e senha ativada.")
+    print(
+        "Limpeza automática ativada: mantém os últimos "
+        f"{retention_days} dias de resultados."
+    )
     print("Use Ctrl+C para encerrar o servidor.")
+    retention_scheduler.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nServidor encerrado.")
     finally:
+        retention_scheduler.stop()
         server.server_close()
 
 if __name__ == "__main__":

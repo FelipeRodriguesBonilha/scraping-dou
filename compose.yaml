@@ -13,6 +13,7 @@ services:
     environment:
       DOU_WEB_USERNAME_FILE: /run/secrets/dou_web_username
       DOU_WEB_PASSWORD_FILE: /run/secrets/dou_web_password
+      DOU_RETENTION_DAYS: ${DOU_RETENTION_DAYS:-15}
     volumes:
       - downloads:/app/downloads
     secrets:

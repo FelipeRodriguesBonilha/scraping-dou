@@ -120,6 +120,29 @@ e o horário do último log; ela também atualiza a lista de arquivos da data
 selecionada. PDFs abrem no navegador e os arquivos `.txt` em `ocorrencias`
 exibem as páginas encontradas.
 
+### Retenção automática dos resultados
+
+Não é necessário configurar um cron no host ou no EasyPanel. Enquanto a
+interface estiver em execução, ela limpa o volume `downloads` ao iniciar e
+diariamente às 03:15, no horário de Brasília. Por padrão, são preservadas as
+últimas 15 datas-calendário, incluindo hoje; por exemplo, em 14/08 são mantidos
+os resultados de 31/07 a 14/08 e as pastas até 30/07 são removidas.
+
+A remoção é feita pela pasta completa da edição (`UF/AAAA-MM-DD`), portanto PDF
+e relatório de ocorrências são apagados juntos. Diretórios com nomes fora do
+formato de data e links simbólicos são ignorados. Caso uma coleta esteja em
+andamento para uma data antiga, essa data é preservada até a próxima limpeza.
+
+Para mudar a janela, defina `DOU_RETENTION_DAYS` entre 1 e 365 no EasyPanel ou
+no `.env` do Docker. O padrão já é 15. Para pré-visualizar manualmente o que
+seria excluído, sem apagar nada:
+
+```bash
+python cleanup_downloads.py --keep-days 15
+```
+
+Use `--apply` apenas quando quiser executar a remoção manualmente.
+
 ### Publicação com Docker em uma VPS
 
 A configuração de produção usa esta arquitetura:
