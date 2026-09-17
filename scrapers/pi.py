@@ -85,11 +85,13 @@ def _search_results(page: Page, keyword: str) -> list[dict]:
     results = payload.get("resposta", [])
     if not isinstance(results, list):
         raise RuntimeError("lista de resultados do PI em formato inesperado")
+    if not all(isinstance(result, dict) for result in results):
+        raise RuntimeError("resultado individual do PI em formato inesperado")
     print(
         f"[{STATE}] portal retornou {len(results)} resultado(s) antes do filtro "
         f"de data para '{keyword}'"
     )
-    return [result for result in results if isinstance(result, dict)]
+    return results
 
 
 def _pdf_content(response) -> bytes:
@@ -126,6 +128,7 @@ def _download_pdf(
             keyword,
             date_value=date_value,
             extract_occurrences=False,
+            deduplicate_identical=False,
         )
     except Exception as error:
         print(f"[{STATE}] falha ao baixar edição {index}: {error}")
@@ -133,15 +136,7 @@ def _download_pdf(
 
 
 def search(page: Page, keyword: str, date_value: str) -> None:
-    try:
-        page.goto(URL, wait_until="commit", timeout=15_000)
-    except Exception as error:
-        print(f"[{STATE}] não foi possível abrir a página de busca: {error}")
-    try:
-        results = _search_results(page, keyword)
-    except Exception as error:
-        print(f"[{STATE}] falha na busca para '{keyword}': {error}")
-        return
+    results = _search_results(page, keyword)
 
     occurrences_by_issue: dict[str, list[dict[str, str]]] = {}
     for result in results:
@@ -158,9 +153,11 @@ def search(page: Page, keyword: str, date_value: str) -> None:
         f"[{STATE}] após filtrar pela data {date_value}: {selected_occurrences} "
         f"ocorrência(s) em {len(occurrences_by_issue)} edição(ões)"
     )
+    failed_editions: list[int] = []
     for index, (href, records) in enumerate(occurrences_by_issue.items(), start=1):
         pdf_path = _download_pdf(page, href, keyword, date_value, index)
         if pdf_path is None:
+            failed_editions.append(index)
             continue
         try:
             save_occurrence_metadata(
@@ -172,6 +169,12 @@ def search(page: Page, keyword: str, date_value: str) -> None:
             )
         except Exception as error:
             print(f"[{STATE}] falha ao salvar ocorrências da edição {index}: {error}")
+            failed_editions.append(index)
+    if failed_editions:
+        raise RuntimeError(
+            "coleta incompleta nas edições "
+            + ", ".join(str(index) for index in failed_editions)
+        )
 
 
 def scrape(

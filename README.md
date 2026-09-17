@@ -1,9 +1,11 @@
 # scraping-dou
 
 Scrapers dos Diários Oficiais estaduais para pesquisar todas as palavras em
-`config.KEYWORDS` usando texto exato, baixar uma vez cada edição encontrada e
-registrar suas páginas de ocorrência em arquivos de texto quando o PDF permitir
-extração.
+`config.KEYWORDS` usando texto exato, baixar as edições públicas encontradas e
+registrar suas páginas de ocorrência em arquivos de texto. Na BA e em SE, onde
+o download não é público nas mesmas condições da leitura, o sistema registra os
+trechos encontrados e o link do leitor oficial sem tentar cadastrar usuário ou
+efetuar pagamento.
 
 ## Instalação
 
@@ -32,8 +34,9 @@ portal entrega uma página de ocorrência por vez, todas as páginas daquela
 edição são reunidas no mesmo relatório, ordenadas pelo número da página.
 Quando duas *edições diferentes* tiverem o mesmo nome remoto, os arquivos
 recebem os sufixos `-2`, `-3` e assim por diante. PDFs digitalizados sem camada
-de texto permanecem em `pdf`, mas não podem ter suas páginas identificadas sem
-OCR.
+de texto não permitem identificar as páginas de ocorrência sem OCR. BA e SE
+geram somente o arquivo em `ocorrencias`, com os trechos e o endereço da leitura
+pública.
 
 Quando um portal não oferece filtro de data no próprio servidor, o scraper
 confere a data exibida no resultado (ou na URL oficial da edição) antes de
@@ -52,19 +55,57 @@ duas UFs; o terceiro mostra o navegador.
 
 ## Cobertura
 
-| Situação | UFs |
+| Modalidade | UFs |
 | --- | --- |
-| Coleta pública | AC, AL, AM, AP, DF, MA, MT, PA, PE, PI, PR, RJ, RR, RS e TO |
-| Login necessário | BA e SE |
+| PDF do portal e relatório de ocorrências | AC, AL, AM, AP, CE, DF, ES, GO, MA, MG, MS, MT, PA, PB, PE, PI, PR, RJ, RN, RO, RR, RS, SC, SP e TO |
+| Leitura pública e relatório de ocorrências, sem download do PDF | BA e SE |
 
-PE usa a busca pública da CEPE. BA e SE são ignorados até que exista uma
-integração de autenticação autorizada.
+BA e SE são pesquisados sem login pelo leitor público. Para essas UFs, o
+sistema grava um arquivo `.txt` com as páginas encontradas, os trechos e o link
+oficial de leitura. Em SE, o download oferecido pelo portal exige cadastro e
+pagamento. A eventual cobrança para download na BA ainda está em verificação.
+
+No RJ, o scraper obtém o documento integral carregado pelo visualizador e
+confere a quantidade de páginas antes de salvá-lo. PE usa a busca pública da
+CEPE.
 
 ## Roteiro de validação
 
-Estas combinações produziram pelo menos um PDF na validação de 12/08/2026.
-Use `python main.py --state UF --date AAAA-MM-DD --keyword termo` para repetir
-qualquer uma delas.
+Entre 15 e 17/09/2026, a busca por `Detran` em `2026-06-02` foi executada nos portais
+incluídos ou corrigidos nesta alteração:
+
+```powershell
+python main.py --state UF --date 2026-06-02 --keyword Detran
+```
+
+| UF | Resultado observado |
+| --- | --- |
+| BA | relatório `.txt`, ocorrências nas páginas 5 e 6 e link para leitura HTML |
+| CE | dois cadernos completos, com 76 e 60 páginas, e relatórios de ocorrências |
+| ES | edição completa de 99 páginas e relatório de ocorrências |
+| GO | edição completa de 79 páginas e relatório de ocorrências |
+| MG | edição completa de 105 páginas e relatório de ocorrências |
+| MS | edição completa de 319 páginas e relatório de ocorrências |
+| PB | edição completa de 60 páginas e relatório de ocorrências |
+| RJ | dois cadernos completos, com 6 e 61 páginas, e relatórios de ocorrências |
+| RN | edição completa de 52 páginas e relatório de ocorrências |
+| RO | edição completa de 369 páginas e relatório de ocorrências |
+| SC | edição completa de 94 páginas e relatório de ocorrências |
+| SE | relatório `.txt`, ocorrência na página 55 e link para leitura no Flip |
+| SP | dez PDFs completos conferidos; cinco com ocorrências, de 126, 199, 311, 25 e 113 páginas |
+
+Após a execução geral de 17/09/2026, as três UFs que haviam falhado foram
+revalidadas. MA concluiu as cinco palavras padrão e teve PDFs e relatórios
+confirmados em buscas com resultados. MS consultou a edição principal de 149
+páginas e o suplemento de 268 páginas da data, pesquisando todos os termos no
+texto integral em uma única passagem; uma busca separada por `Detran` confirmou
+ocorrências em ambos. SP consultou seis PDFs completos nas quatro seções
+indicadas pela busca das palavras padrão; cinco continham `vistoria`. AC passou
+a resumir as edições fora da data, e PI teve PDF e relatório confirmados sem a
+navegação inicial desnecessária.
+
+As demais UFs mantêm as combinações de validação abaixo. Use o mesmo comando,
+trocando data e palavra-chave, para repeti-las.
 
 | UF | Data | Palavra-chave |
 | --- | --- | --- |
@@ -79,12 +120,9 @@ qualquer uma delas.
 | PE | 2026-08-12 | detran |
 | PI | 2026-03-13 | vistoria |
 | PR | 2026-08-11 | portaria |
-| RJ | 2026-08-11 | portaria |
 | RR | 2025-08-12 | vistoria |
 | RS | 2026-08-11 | portaria |
 | TO | 2026-08-11 | vistoria |
-
-BA e SE não aparecem no roteiro porque continuam dependendo de login.
 
 ## Interface web e publicação
 
@@ -228,5 +266,6 @@ sobre HTTPS automático](https://caddyserver.com/docs/automatic-https).
 ## Verificação
 
 ```powershell
-python -m unittest -v
+python -m compileall -q main.py scrapers web cleanup_downloads.py
+python main.py --help
 ```

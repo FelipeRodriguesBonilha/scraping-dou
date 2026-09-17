@@ -289,6 +289,7 @@ def _write_occurrence_text(
     target: Path,
     *,
     source_name: str,
+    source_url: str | None,
     keyword: str,
     pages: list[tuple[int, str]],
 ) -> None:
@@ -297,6 +298,8 @@ def _write_occurrence_text(
         f"Busca: {keyword}",
         "Páginas de ocorrência: " + ", ".join(str(number) for number, _ in pages),
     ]
+    if source_url:
+        header.append(f"Consulta pública: {source_url}")
 
     sections = ["\n".join(header), ""]
     for page_number, text in pages:
@@ -318,6 +321,7 @@ def save_occurrence_text(
     *,
     date_value: date | datetime | str | None = None,
     target_dir: Path | None = None,
+    source_url: str | None = None,
 ) -> Path:
     page_map: dict[int, str] = {}
     for page_number, text in pages:
@@ -338,6 +342,7 @@ def save_occurrence_text(
     _write_occurrence_text(
         target,
         source_name=source_name,
+        source_url=source_url,
         keyword=keyword,
         pages=normalized_pages,
     )
@@ -560,7 +565,3 @@ def scrape_with_playwright(
             date_value=date_value,
             headless=headless,
         )
-
-
-def skip_login_only(state: str) -> None:
-    print(f"[{state.upper()}] pulado: portal exige login; scraper ainda não implementado.")

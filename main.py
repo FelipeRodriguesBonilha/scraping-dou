@@ -2,11 +2,68 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable
+from contextlib import nullcontext
 
-from scrapers import ac, al, am, ap, ba, df, ma, mt, pa, pe, pi, pr, rj, rr, rs, se, to
+from scrapers import (
+    ac,
+    al,
+    am,
+    ap,
+    ba,
+    ce,
+    df,
+    es,
+    go,
+    ma,
+    mg,
+    ms,
+    mt,
+    pa,
+    pb,
+    pe,
+    pi,
+    pr,
+    rj,
+    rn,
+    ro,
+    rr,
+    rs,
+    sc,
+    se,
+    sp,
+    to,
+)
 
 
-SCRAPERS = [ac, al, am, ap, ba, df, ma, mt, pa, pe, pi, pr, rj, rr, rs, se, to]
+SCRAPERS = [
+    ac,
+    al,
+    am,
+    ap,
+    ba,
+    ce,
+    df,
+    es,
+    go,
+    ma,
+    mg,
+    ms,
+    mt,
+    pa,
+    pb,
+    pe,
+    pi,
+    pr,
+    rj,
+    rn,
+    ro,
+    rr,
+    rs,
+    sc,
+    se,
+    sp,
+    to,
+]
 
 
 def main(
@@ -28,50 +85,36 @@ def main(
 
     print(f"[sistema] {len(selected_scrapers)} UF(s) selecionada(s).")
 
-    login_only = [
-        scraper for scraper in selected_scrapers if getattr(scraper, "LOGIN_REQUIRED", False)
-    ]
-    browser_scrapers = [scraper for scraper in selected_scrapers if scraper not in login_only]
     failures = 0
 
-    for scraper in login_only:
-        print(f"[{scraper.STATE}] iniciando...")
+    requires_browser = any(
+        getattr(scraper, "PLAYWRIGHT_REQUIRED", True)
+        for scraper in selected_scrapers
+    )
+    if requires_browser:
         try:
-            scraper.scrape(
-                keywords=keywords,
-                date_value=date_value,
-                headless=headless,
-            )
-        except Exception as error:
-            failures += 1
-            print(f"[{scraper.STATE}] falhou: {error}")
-        else:
-            print(f"[{scraper.STATE}] concluído.")
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            print("Playwright não está instalado. Execute: pip install -r requirements.txt")
+            print("Depois instale o navegador: playwright install chromium")
+            return 2
+        playwright_context = sync_playwright()
+    else:
+        playwright_context = nullcontext(None)
 
-    if not browser_scrapers:
-        print(
-            f"[sistema] execução concluída: {len(selected_scrapers)} UF(s), "
-            f"{failures} falha(s)."
-        )
-        return 1 if failures else 0
-
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("Playwright não está instalado. Execute: pip install -r requirements.txt")
-        print("Depois instale o navegador: playwright install chromium")
-        return 2
-
-    with sync_playwright() as playwright:
-        for scraper in browser_scrapers:
+    with playwright_context as playwright:
+        for scraper in selected_scrapers:
             print(f"[{scraper.STATE}] iniciando...")
             try:
-                scraper.scrape(
-                    playwright,
-                    keywords=keywords,
-                    date_value=date_value,
-                    headless=headless,
-                )
+                scrape_arguments = {
+                    "keywords": keywords,
+                    "date_value": date_value,
+                    "headless": headless,
+                }
+                if getattr(scraper, "PLAYWRIGHT_REQUIRED", True):
+                    scraper.scrape(playwright, **scrape_arguments)
+                else:
+                    scraper.scrape(**scrape_arguments)
             except Exception as error:
                 failures += 1
                 print(f"[{scraper.STATE}] falhou: {error}")
@@ -86,7 +129,9 @@ def main(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Baixa os diários oficiais pesquisados.")
+    parser = argparse.ArgumentParser(
+        description="Pesquisa os diários oficiais e salva os resultados."
+    )
     parser.add_argument(
         "--date",
         dest="date_value",

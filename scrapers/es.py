@@ -1,32 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
-from scrapers.common import run_for_keywords, scrape_with_playwright
-from scrapers.public_reader import search_public_reader
+from .common import run_for_keywords, scrape_with_playwright
+from .ionews import search_ionews
 
 
-STATE = "SE"
-BASE_URL = "https://iose.se.gov.br"
+STATE = "ES"
+BASE_URL = "https://ioes.dio.es.gov.br"
 
 
 def search(page, keyword: str, date_value: str) -> None:
-    search_public_reader(
-        page,
-        keyword,
-        date_value,
-        state=STATE,
-        base_url=BASE_URL,
-        viewer="flip",
-    )
+    search_ionews(page, keyword, date_value, state=STATE, base_url=BASE_URL)
 
 
-def scrape(
-    playwright=None,
-    keywords: Iterable[str] | None = None,
-    date_value=None,
-    headless: bool = True,
-) -> None:
+def scrape(playwright=None, *, keywords=None, date_value=None, headless=True) -> None:
     if playwright is None:
         scrape_with_playwright(
             STATE,

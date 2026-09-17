@@ -34,20 +34,21 @@ def _result_filename(link, publication_date: str | None = None) -> str | None:
 
 
 def _download_results(
-    page, keyword: str, date_value: str, seen_diaries: set[str]
+    page,
+    keyword: str,
+    date_value: str,
+    seen_diaries: set[str],
+    failed_downloads: list[str],
 ) -> int:
     links = page.locator(".resultados_busca a[title='Fazer download']")
-    downloaded = 0
+    skipped_dates = 0
     for index in range(links.count()):
         link = links.nth(index)
         label = " ".join(link.inner_text().split())
         publication_date = _publication_date(link)
 
         if not matches_date(publication_date, date_value):
-            print(
-                f"[{STATE}] edição fora da data solicitada ignorada: "
-                f"{label} ({publication_date or 'data ausente'})"
-            )
+            skipped_dates += 1
             continue
         href = link.get_attribute("href") or label
         if href in seen_diaries:
@@ -66,10 +67,10 @@ def _download_results(
                 filename,
                 date_value=date_value,
             )
-            downloaded += 1
         except Exception as error:
             print(f"[{STATE}] falha ao baixar '{label}': {error}")
-    return downloaded
+            failed_downloads.append(label)
+    return skipped_dates
 
 
 def _current_page_index(page) -> int | None:
@@ -101,7 +102,7 @@ def _next_page_index(page, current_index: int) -> int | None:
     return min(future_pages, default=None)
 
 
-def _go_to_page(page, page_index: int) -> bool:
+def _go_to_page(page, page_index: int) -> None:
     form = page.locator("#buscaPorPalavra")
     try:
         with page.expect_navigation(wait_until="domcontentloaded", timeout=60_000):
@@ -114,10 +115,10 @@ def _go_to_page(page, page_index: int) -> bool:
             )
         page.locator(".resultados_busca").wait_for(timeout=60_000)
     except Exception as error:
-        print(f"[{STATE}] falha ao abrir página {page_index + 1}: {error}")
-        return False
+        raise RuntimeError(f"falha ao abrir página {page_index + 1}: {error}") from error
 
-    return _current_page_index(page) == page_index
+    if _current_page_index(page) != page_index:
+        raise RuntimeError(f"o portal não avançou para a página {page_index + 1}")
 
 
 def _select_exact_text(page) -> None:
@@ -148,18 +149,48 @@ def search(page, keyword: str, date_value: str) -> None:
 
     seen_diaries: set[str] = set()
     visited_pages: set[int] = set()
+    failed_downloads: list[str] = []
+    skipped_dates = 0
+    pagination_error: Exception | None = None
     for _ in range(MAX_PAGES):
         current_index = _current_page_index(page)
-        if current_index is None or current_index in visited_pages:
+        if current_index is None:
+            pagination_error = RuntimeError("o portal não informou a página atual")
+            break
+        if current_index in visited_pages:
+            pagination_error = RuntimeError(f"o portal repetiu a página {current_index + 1}")
             break
         visited_pages.add(current_index)
-        _download_results(page, keyword, date_value, seen_diaries)
+        skipped_dates += _download_results(
+            page, keyword, date_value, seen_diaries, failed_downloads
+        )
 
         next_index = _next_page_index(page, current_index)
-        if next_index is None or next_index in visited_pages:
+        if next_index is None:
             break
-        if not _go_to_page(page, next_index):
+        if next_index in visited_pages:
+            pagination_error = RuntimeError(f"o portal repetiu a página {next_index + 1}")
             break
+        try:
+            _go_to_page(page, next_index)
+        except Exception as error:
+            pagination_error = error
+            break
+    else:
+        pagination_error = RuntimeError(f"a busca excedeu o limite de {MAX_PAGES} páginas")
+
+    if skipped_dates:
+        print(
+            f"[{STATE}] {skipped_dates} edição(ões) fora da data {date_value} "
+            f"ignorada(s) para '{keyword}'"
+        )
+    if failed_downloads or pagination_error:
+        details = []
+        if failed_downloads:
+            details.append(f"{len(failed_downloads)} download(s) falharam")
+        if pagination_error:
+            details.append(str(pagination_error))
+        raise RuntimeError("coleta incompleta: " + "; ".join(details))
 
 
 def scrape(playwright=None, keywords=None, date_value=None, headless: bool = True) -> None:
