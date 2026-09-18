@@ -104,13 +104,24 @@ indicadas pela busca das palavras padrão; cinco continham `vistoria`. AC passou
 a resumir as edições fora da data, e PI teve PDF e relatório confirmados sem a
 navegação inicial desnecessária.
 
+Em 18/09/2026, AL foi revalidado com a edição publicada nessa data e a palavra
+`portaria`. O scraper consulta o catálogo de edições e pesquisa o texto do PDF,
+pois o índice de busca do portal não retornava as edições recentes.
+
+Na validação por UF de 18/09/2026, as 25 UFs com download público geraram ao
+menos um PDF com páginas legíveis. BA e SE geraram relatórios PDF a partir dos
+trechos consultados publicamente; esses relatórios não são as edições oficiais.
+Em SP, dois PDFs completos foram conferidos, mas a varredura daquela execução
+foi interrompida antes do fim. O PDF fornecido pelo portal de SC tem uma tabela
+de referências irregular; o `pypdf` recuperou o arquivo e leu suas 94 páginas.
+
 As demais UFs mantêm as combinações de validação abaixo. Use o mesmo comando,
 trocando data e palavra-chave, para repeti-las.
 
 | UF | Data | Palavra-chave |
 | --- | --- | --- |
 | AC | 2026-08-12 | vistoria |
-| AL | 2026-08-12 | vistoria |
+| AL | 2026-09-18 | portaria |
 | AM | 2026-08-11 | governo |
 | AP | 2026-08-11 | vistoria |
 | DF | 2026-08-12 | vistoria |
@@ -121,7 +132,7 @@ trocando data e palavra-chave, para repeti-las.
 | PI | 2026-03-13 | vistoria |
 | PR | 2026-08-11 | portaria |
 | RR | 2025-08-12 | vistoria |
-| RS | 2026-08-11 | portaria |
+| RS | 2025-08-11 | portaria |
 | TO | 2026-08-11 | vistoria |
 
 ## Interface web e publicação
